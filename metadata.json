@@ -1,0 +1,6 @@
+{
+  "name": "Election Assistant",
+  "description": "A structured civic guidance system that provides verified election data, polling locations, and candidate information using the Google Civic Information API and Gemini AI.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["AI-powered guidance", "Election data integration", "Multi-step voter assistance"]
+}
