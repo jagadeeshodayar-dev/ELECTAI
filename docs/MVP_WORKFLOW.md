@@ -21,7 +21,7 @@ flowchart TD
 1. Input: The user types an address or uses the centered microphone. This improves access for users who struggle with typing.
 2. Validation: The server rejects empty or oversized addresses and removes prompt-injection markers before any API call.
 3. Civic data: The backend calls Google Civic Information API using a server-only key.
-4. Extraction: The app copies only known Civic fields into a normalized object. Missing data becomes `This information is not available.`
+4. Extraction: The app copies only known Civic fields into a normalized object. Pending data becomes `Official data pending.`
 5. Session: Firestore stores the sanitized address, normalized election data, current step, and timestamps.
 6. Decision engine: Three flags guide the response: upcoming election, polling location present, candidate data present.
 7. Gemini: Gemini receives only the structured session object and is instructed not to infer facts.

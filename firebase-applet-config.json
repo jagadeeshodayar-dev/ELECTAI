@@ -1,10 +1,4 @@
 {
-  "projectId": "team-collabration-tool",
-  "appId": "1:1015652002227:web:4097423af7028271be03c6",
-  "apiKey": "AIzaSyCpWDZD2kwEkGeZibxZyqCiIg5quNrzTwI",
-  "authDomain": "team-collabration-tool.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-9b9e6e19-c782-4bca-a7ad-b4494eeed7fc",
-  "storageBucket": "team-collabration-tool.firebasestorage.app",
-  "messagingSenderId": "1015652002227",
-  "measurementId": ""
+  "deprecated": true,
+  "message": "Firebase web config is now defined by FIREBASE_* Cloud Run runtime environment variables."
 }

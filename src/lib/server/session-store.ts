@@ -1,9 +1,26 @@
 import 'server-only';
+import { randomUUID } from 'crypto';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { UserSession } from '@/types';
+import { SupportedCountry, UserSession } from '@/types';
 
 const memorySessions = new Map<string, UserSession>();
+const memoryFeedback = new Map<string, FeedbackRecord>();
+
+export type FeedbackInput = {
+  rating: number;
+  category: 'missing-info' | 'wrong-answer' | 'hard-to-use' | 'feature-request' | 'other';
+  message: string;
+  country: SupportedCountry;
+  userId: string | null;
+  sessionId: string | null;
+  pageHost: string | null;
+  createdAt: number;
+};
+
+export type FeedbackRecord = FeedbackInput & {
+  id: string;
+};
 
 function getAdminDb() {
   if (!getApps().length) {
@@ -40,6 +57,23 @@ export async function getSession(sessionId: string) {
   } catch {
     return null;
   }
+}
+
+export async function saveFeedback(input: FeedbackInput): Promise<FeedbackRecord> {
+  const feedback = {
+    id: randomUUID(),
+    ...input,
+  };
+
+  memoryFeedback.set(feedback.id, feedback);
+
+  try {
+    await getAdminDb().collection('feedback').doc(feedback.id).set(feedback, { merge: true });
+  } catch {
+    // Keep feedback submission usable in local development when Firebase Admin is not configured.
+  }
+
+  return feedback;
 }
 
 export function redactSessionForClient(session: UserSession): UserSession {

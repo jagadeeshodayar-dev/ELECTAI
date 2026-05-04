@@ -21,7 +21,7 @@ export async function fetchVoterInfo(sanitizedAddress: string) {
   const payload = await response.json();
 
   if (!response.ok) {
-    const message = toFriendlyCivicAddressError(payload?.error?.message || 'Failed to fetch verified election data.');
+    const message = toFriendlyCivicAddressError(payload?.error?.message || 'Failed to fetch verified election data.', 'US');
     if (message.includes('referer') || message.includes('Referer')) {
       throw new Error(
         'Google Civic API key is restricted to HTTP referrers. Create a separate server key for GOOGLE_CIVIC_API_KEY with API restriction set to Civic Information API, and do not use website/referrer restrictions for backend calls.',

@@ -23,7 +23,35 @@ function getGeminiClient() {
   return ai;
 }
 
+function indiaGuidance(session: UserSession): GuidanceResponse {
+  const resources = session.electionData.officialResources;
+  const voterPortal = resources.votingLocationFinderUrl !== MISSING ? resources.votingLocationFinderUrl : 'https://voters.eci.gov.in/';
+  const voterSearch = resources.electionRegistrationConfirmationUrl !== MISSING ? resources.electionRegistrationConfirmationUrl : voterPortal;
+  const candidatePortal = resources.ballotInfoUrl !== MISSING ? resources.ballotInfoUrl : 'https://affidavit.eci.gov.in/';
+  const schedulePortal = resources.electionInfoUrl !== MISSING ? resources.electionInfoUrl : 'https://www.eci.gov.in/';
+
+  return {
+    stepInstructions: [
+      `Step ${session.currentStep} of 5: Use the official India voter services for the next lookup.`,
+      'Your address was accepted for the India workflow.',
+      'Polling booth details require an ECI voter search using EPIC, mobile, or voter details.',
+      'Candidate affidavits appear after nominations are filed for the election.',
+      `Official source: ${resources.electionAuthorityName}.`,
+    ],
+    timelineSummary: `Election dates are published by ECI and state election offices. Check the current schedule on ${schedulePortal}`,
+    pollingLocationDetails: `Find your polling booth on the ECI voter services portal: ${voterPortal}`,
+    candidateOverview: `Use the ECI Candidate Affidavit portal after selecting the election and constituency: ${candidatePortal}`,
+    nextConcreteAction: `Open ECI voter search and verify your voter record or polling station: ${voterSearch}`,
+    transparencyNote:
+      'India mode uses Google for address normalization and official ECI services for voter actions. It does not infer polling booths, dates, or candidates from the typed address.',
+  };
+}
+
 function fallbackGuidance(session: UserSession): GuidanceResponse {
+  if (session.country === 'IN') {
+    return indiaGuidance(session);
+  }
+
   const location = session.electionData.pollingLocations[0];
   const contestCount = session.electionData.contests.length;
   const resources = session.electionData.officialResources;
@@ -46,11 +74,15 @@ function fallbackGuidance(session: UserSession): GuidanceResponse {
       : MISSING,
     candidateOverview: contestCount > 0 ? `${contestCount} contest(s) are listed in the verified data.` : MISSING,
     nextConcreteAction: officialAction,
-    transparencyNote: 'Election facts are from the Google Civic Information API. Missing fields are not inferred.',
+    transparencyNote: `Election facts are from ${session.electionData.dataProvider}. Pending fields are not inferred.`,
   };
 }
 
 export async function generateGuidance(session: UserSession): Promise<GuidanceResponse> {
+  if (session.country === 'IN') {
+    return indiaGuidance(session);
+  }
+
   try {
     const response = await getGeminiClient().models.generateContent({
       model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',

@@ -12,19 +12,30 @@ import {
   ExternalLink,
   Info,
   LogIn,
+  LogOut,
   MapPin,
+  MessageCircle,
   Mic,
   Navigation,
   Search,
+  Send,
   ShieldCheck,
   UserRound,
   Users,
 } from 'lucide-react';
-import { onAuthStateChanged, User } from 'firebase/auth';
 import { formatCivicAddress, getAddressCompletionHint, hasCompleteAddressSignal, normalizeSpokenAddress, safeExternalUrl } from '@/lib/address-utils';
-import { auth, getFirebaseAuthMessage, signInWithGoogle } from '@/lib/firebase';
-import { createAssistantSession, getGuidance, transcribeAddress } from '@/lib/api';
-import { GuidanceResponse, MISSING, OfficialElectionResources, PollingLocation, UserSession } from '@/types';
+import { askCivicQuestion, createAssistantSession, getGuidance, getLocationSuggestions, submitFeedback, transcribeAddress } from '@/lib/api';
+import { useAuth } from '@/context/auth-context';
+import {
+  CivicQuestionResponse,
+  GuidanceResponse,
+  LocationSuggestion,
+  MISSING,
+  OfficialElectionResources,
+  PollingLocation,
+  SupportedCountry,
+  UserSession,
+} from '@/types';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -39,6 +50,51 @@ const STEPS = [
   { id: 3, label: 'Where', icon: MapPin },
   { id: 4, label: 'Candidates', icon: Users },
   { id: 5, label: 'Action', icon: CheckCircle2 },
+];
+
+const COUNTRY_OPTIONS: Array<{
+  code: SupportedCountry;
+  label: string;
+  badge: string;
+  addressLabel: string;
+  placeholder: string;
+  help: string;
+}> = [
+  {
+    code: 'IN',
+    label: 'India',
+    badge: 'India first, global-ready provider data',
+    addressLabel: 'India voting address',
+    placeholder: 'MG Road, Bengaluru, Karnataka 560001',
+    help: 'Include locality, city, state, and 6-digit PIN code. Google is used to verify the address.',
+  },
+  {
+    code: 'US',
+    label: 'United States',
+    badge: 'Verified Google Civic data',
+    addressLabel: 'U.S. voting address',
+    placeholder: '1600 Pennsylvania Ave NW, Washington, DC 20500',
+    help: 'Include street, city, state, and ZIP. Google Civic returns election details where supported.',
+  },
+];
+
+const INDIA_HELP_QUESTIONS = [
+  'When is the next CM election?',
+  'How do I check my name in the voter list?',
+  'How do I find my polling booth?',
+  'Where can I see candidate affidavits?',
+  'What election laws or rules should I know?',
+  'How do I complain about election violations?',
+];
+
+type FeedbackCategory = 'missing-info' | 'wrong-answer' | 'hard-to-use' | 'feature-request' | 'other';
+
+const FEEDBACK_CATEGORIES: Array<{ value: FeedbackCategory; label: string }> = [
+  { value: 'missing-info', label: 'Incomplete official data' },
+  { value: 'wrong-answer', label: 'Wrong answer' },
+  { value: 'hard-to-use', label: 'Hard to use' },
+  { value: 'feature-request', label: 'Feature request' },
+  { value: 'other', label: 'Other' },
 ];
 
 type SpeechRecognitionResultLike = {
@@ -69,12 +125,21 @@ type SpeechWindow = Window & {
 };
 
 export function ElectionAssistant() {
+  const [country, setCountry] = useState<SupportedCountry>('IN');
   const [address, setAddress] = useState('');
   const [session, setSession] = useState<UserSession | null>(null);
   const [guidance, setGuidance] = useState<GuidanceResponse | null>(null);
-  const [user, setUser] = useState<User | null>(null);
-  const [localGuestId, setLocalGuestId] = useState<string | null>(null);
-  const [authNotice, setAuthNotice] = useState('');
+  const [civicQuestion, setCivicQuestion] = useState('');
+  const [civicAnswer, setCivicAnswer] = useState<CivicQuestionResponse | null>(null);
+  const [questionLoading, setQuestionLoading] = useState(false);
+  const [locationSuggestions, setLocationSuggestions] = useState<LocationSuggestion[]>([]);
+  const [locationStatus, setLocationStatus] = useState('');
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [feedbackRating, setFeedbackRating] = useState(5);
+  const [feedbackCategory, setFeedbackCategory] = useState<FeedbackCategory>('missing-info');
+  const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [feedbackStatus, setFeedbackStatus] = useState('');
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
   const [error, setError] = useState('');
@@ -82,13 +147,65 @@ export function ElectionAssistant() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const browserRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
-
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  const locationRequestRef = useRef(0);
+  const selectedLocationLabelRef = useRef('');
+  const {
+    profile,
+    userId: authUserId,
+    status: authStatus,
+    notice: authNotice,
+    signInAsGuest,
+    signInGoogle,
+    signOutUser,
+    clearNotice,
+  } = useAuth();
 
   const activeStep = session?.currentStep || 1;
-  const currentUserId = user?.uid || localGuestId;
-  const addressHint = getAddressCompletionHint(address);
-  const canSubmit = hasCompleteAddressSignal(address) && !loading;
+  const currentUserId = authUserId;
+  const countryContent = COUNTRY_OPTIONS.find((option) => option.code === country) || COUNTRY_OPTIONS[0];
+  const addressHint = getAddressCompletionHint(address, country);
+  const canSubmit = hasCompleteAddressSignal(address, country) && !loading;
+
+  useEffect(() => {
+    const query = address.trim();
+    if (query.length < 3) {
+      setLocationSuggestions([]);
+      setLocationStatus('');
+      setLocationLoading(false);
+      return;
+    }
+    if (query === selectedLocationLabelRef.current) {
+      setLocationSuggestions([]);
+      setLocationLoading(false);
+      return;
+    }
+
+    const requestId = locationRequestRef.current + 1;
+    locationRequestRef.current = requestId;
+    const timer = window.setTimeout(async () => {
+      setLocationLoading(true);
+      try {
+        const result = await getLocationSuggestions(query, country);
+        if (locationRequestRef.current !== requestId) return;
+        setLocationSuggestions(result.suggestions);
+        if (!result.configured) {
+          setLocationStatus('Google location suggestions need a Maps or Geocoding key in this environment.');
+        } else if (result.suggestions.length) {
+          setLocationStatus('Google location suggestions are ready.');
+        } else {
+          setLocationStatus(result.message || 'No Google location match yet. Add locality, state, and PIN code.');
+        }
+      } catch (err) {
+        if (locationRequestRef.current !== requestId) return;
+        setLocationSuggestions([]);
+        setLocationStatus(err instanceof Error ? err.message : 'Unable to load Google location suggestions.');
+      } finally {
+        if (locationRequestRef.current === requestId) setLocationLoading(false);
+      }
+    }, 450);
+
+    return () => window.clearTimeout(timer);
+  }, [address, country]);
 
   useEffect(() => {
     return () => {
@@ -103,15 +220,15 @@ export function ElectionAssistant() {
 
     const normalizedAddress = normalizeSpokenAddress(address);
     setAddress(normalizedAddress);
-    if (!hasCompleteAddressSignal(normalizedAddress)) {
-      setError('Add street, city, state, and ZIP before starting. This keeps Google Civic from returning address parse errors.');
+    if (!hasCompleteAddressSignal(normalizedAddress, country)) {
+      setError(getAddressCompletionHint(normalizedAddress, country) || 'Add a complete voting address before starting.');
       return;
     }
 
     setLoading(true);
     setError('');
     try {
-      const response = await createAssistantSession(normalizedAddress, currentUserId);
+      const response = await createAssistantSession(normalizedAddress, currentUserId, country);
       setSession(response.session);
       setGuidance(response.guidance);
       setSpeechStatus('');
@@ -119,6 +236,44 @@ export function ElectionAssistant() {
       setError(err instanceof Error ? err.message : 'Unable to start the assistant.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  function chooseLocationSuggestion(suggestion: LocationSuggestion) {
+    selectedLocationLabelRef.current = suggestion.label;
+    setAddress(suggestion.label);
+    setLocationSuggestions([]);
+    setLocationStatus(formatLocationStatus(suggestion));
+    setError('');
+  }
+
+  async function handleFeedbackSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = feedbackMessage.trim();
+    if (feedbackLoading) return;
+    if (message.length < 5) {
+      setFeedbackStatus('Share a little more detail so the team can act on it.');
+      return;
+    }
+
+    setFeedbackLoading(true);
+    setFeedbackStatus('');
+    try {
+      const response = await submitFeedback({
+        rating: feedbackRating,
+        category: feedbackCategory,
+        message,
+        country,
+        userId: currentUserId || null,
+        sessionId: session?.id || null,
+        pageHost: getCurrentHost(),
+      });
+      setFeedbackMessage('');
+      setFeedbackStatus(response.message);
+    } catch (err) {
+      setFeedbackStatus(err instanceof Error ? err.message : 'Unable to save feedback right now.');
+    } finally {
+      setFeedbackLoading(false);
     }
   }
 
@@ -140,27 +295,34 @@ export function ElectionAssistant() {
     }
   }
 
-  function handleGuestSignIn() {
+  async function handleGuestSignIn() {
     setError('');
-    setAuthNotice('');
-
-    if (!localGuestId) {
-      const id = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? `local-guest-${crypto.randomUUID()}`
-        : `local-guest-${Date.now()}`;
-      setLocalGuestId(id);
-    }
-
-    setAuthNotice('Guest mode is ready for this device. You can use the MVP without Firebase Auth while authorized domains are being configured.');
+    await signInAsGuest();
   }
 
   async function handleGoogleSignIn() {
     setError('');
-    setAuthNotice('');
+    await signInGoogle();
+  }
+
+  async function handleSignOut() {
+    setError('');
+    await signOutUser();
+  }
+
+  async function submitCivicQuestion(question = civicQuestion) {
+    const trimmed = question.trim();
+    if (!trimmed || questionLoading) return;
+
+    setCivicQuestion(trimmed);
+    setQuestionLoading(true);
+    setError('');
     try {
-      await signInWithGoogle();
+      setCivicAnswer(await askCivicQuestion(trimmed, country));
     } catch (err) {
-      setAuthNotice(getFirebaseAuthMessage(err));
+      setError(err instanceof Error ? err.message : 'Unable to answer this civic question.');
+    } finally {
+      setQuestionLoading(false);
     }
   }
 
@@ -191,9 +353,9 @@ export function ElectionAssistant() {
       const normalizedAddress = normalizeSpokenAddress(transcript);
       setAddress(normalizedAddress);
       setSpeechStatus(
-        hasCompleteAddressSignal(normalizedAddress)
+        hasCompleteAddressSignal(normalizedAddress, country)
           ? `Heard: ${transcript}`
-          : `Heard: ${transcript}. Please add city, state, and ZIP before starting.`,
+          : `Heard: ${transcript}. ${getAddressCompletionHint(normalizedAddress, country) || 'Please add more address detail before starting.'}`,
       );
     };
     recognition.start();
@@ -227,12 +389,12 @@ export function ElectionAssistant() {
           setSpeechStatus(
             result.transcript
               ? result.needsMoreDetail
-                ? `Heard: ${result.transcript}. Please add city, state, and ZIP before starting.`
+                ? `Heard: ${result.transcript}. ${getAddressCompletionHint(result.normalizedAddress || result.transcript, country) || 'Please add more address detail before starting.'}`
                 : `Heard: ${result.transcript}`
               : 'No speech was detected. Try again or type the address.',
           );
         } catch (err) {
-          setError(err instanceof Error ? err.message : 'Voice input is not available.');
+          setError(err instanceof Error ? err.message : 'Voice input could not start.');
           setSpeechStatus('');
         }
       };
@@ -257,14 +419,22 @@ export function ElectionAssistant() {
           </div>
           <div className="elect-auth-actions">
             <span className="elect-user-state" aria-live="polite">
-              {user ? (user.isAnonymous ? 'Guest ready' : user.displayName || user.email || 'Google ready') : localGuestId ? 'Guest ready' : 'Guest optional'}
+              {getAuthLabel(profile, authStatus)}
             </span>
-            <Button type="button" variant="secondary" size="sm" onClick={handleGuestSignIn} aria-label="Continue as guest">
-              <UserRound /> Guest
-            </Button>
-            <Button type="button" size="sm" onClick={handleGoogleSignIn} aria-label="Sign in with Google">
-              <LogIn /> Google
-            </Button>
+            {profile ? (
+              <Button type="button" variant="secondary" size="sm" onClick={handleSignOut} aria-label="Sign out">
+                <LogOut /> Sign out
+              </Button>
+            ) : (
+              <>
+                <Button type="button" variant="secondary" size="sm" onClick={handleGuestSignIn} aria-label="Continue as guest">
+                  <UserRound /> Guest
+                </Button>
+                <Button type="button" size="sm" onClick={handleGoogleSignIn} aria-label="Sign in with Google">
+                  <LogIn /> Google
+                </Button>
+              </>
+            )}
           </div>
         </header>
 
@@ -272,49 +442,127 @@ export function ElectionAssistant() {
           <div className="elect-primary">
             <div className="elect-hero">
               <Badge>
-                <ShieldCheck /> Verified Google Civic data only
+                <ShieldCheck /> {countryContent.badge}
               </Badge>
               <h2>Know exactly what to do before you vote.</h2>
               <p>
-                Enter your address. ELECTAI checks official election data, then walks you through the election,
-                date, polling place, candidates, and next action.
+                Choose a country and enter your address. ELECTAI checks the configured Google and official election
+                data providers, then walks you through the election, date, polling place, candidates, and next action.
               </p>
             </div>
 
             <Card className="elect-address-card">
-              <form onSubmit={submitAddress} aria-describedby="address-help address-hint">
+              <form className="elect-address-form" onSubmit={submitAddress} aria-describedby="address-help address-hint location-status">
+                <div className="elect-address-topline">
+                  <div>
+                    <p className="elect-card-kicker">Address intelligence</p>
+                    <h3>Verify location, then start</h3>
+                  </div>
+                  <div className="elect-country-control">
+                    <label htmlFor="country">Country</label>
+                    <select
+                      id="country"
+                      className="elect-country-select"
+                      value={country}
+                      onChange={(event) => {
+                        setCountry(event.target.value as SupportedCountry);
+                        setError('');
+                        setGuidance(null);
+                        setSession(null);
+                        setLocationSuggestions([]);
+                        setLocationStatus('');
+                        selectedLocationLabelRef.current = '';
+                      }}
+                    >
+                      {COUNTRY_OPTIONS.map((option) => (
+                        <option key={option.code} value={option.code}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
                 <label className="elect-field-label" htmlFor="address">
-                  Full U.S. voting address
+                  {countryContent.addressLabel}
                 </label>
                 <div className="elect-address-row">
-                  <div className="elect-input-wrap">
+                  <div className="elect-input-wrap elect-location-field">
                     <Search className="elect-input-icon" />
                     <Input
                       id="address"
                       value={address}
                       onChange={(event) => {
+                        selectedLocationLabelRef.current = '';
                         setAddress(event.target.value);
                         setError('');
                       }}
-                      placeholder="1600 Pennsylvania Ave NW, Washington, DC 20500"
+                      placeholder={countryContent.placeholder}
                       className="elect-address-input"
                       autoComplete="street-address"
                       aria-invalid={Boolean(error)}
-                      aria-describedby="address-help address-hint speech-status"
+                      aria-describedby="address-help address-hint speech-status location-status"
                     />
+                    {locationSuggestions.length > 0 && (
+                      <div className="elect-location-menu" role="listbox" aria-label="Google location suggestions">
+                        {locationSuggestions.map((suggestion) => (
+                          <button
+                            key={suggestion.id}
+                            type="button"
+                            role="option"
+                            aria-selected={address === suggestion.label}
+                            className="elect-location-option"
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => chooseLocationSuggestion(suggestion)}
+                          >
+                            <MapPin aria-hidden="true" />
+                            <span>
+                              <strong>{suggestion.label}</strong>
+                              <small>{formatLocationMeta(suggestion)}</small>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <Button type="submit" disabled={!canSubmit} size="lg">
+                  <Button type="submit" disabled={!canSubmit} size="lg" className="elect-start-button">
                     {loading ? 'Checking...' : 'Start'}
                   </Button>
                 </div>
-                <p id="address-help" className="elect-address-help">
-                  Include street, city, state, and ZIP. Spoken input is reviewed before it is sent to Google Civic.
-                </p>
-                <p id="address-hint" className={addressHint ? 'elect-address-hint' : 'sr-only'}>
-                  {addressHint || 'Address looks complete.'}
-                </p>
+                <div className="elect-address-support">
+                  <p id="address-help" className="elect-address-help">
+                    {countryContent.help} Spoken input is reviewed before it is sent to Google or election-data services.
+                  </p>
+                  <p id="address-hint" className={addressHint ? 'elect-address-hint' : 'elect-address-ready'}>
+                    {addressHint || 'Address has enough detail to begin.'}
+                  </p>
+                  <p id="location-status" className="elect-location-status" aria-live="polite">
+                    {locationLoading ? 'Checking Google location data...' : locationStatus}
+                  </p>
+                </div>
               </form>
             </Card>
+
+            <CivicQuestionPanel
+              country={country}
+              question={civicQuestion}
+              answer={civicAnswer}
+              loading={questionLoading}
+              onQuestionChange={setCivicQuestion}
+              onAsk={submitCivicQuestion}
+            />
+
+            <FeedbackPanel
+              rating={feedbackRating}
+              category={feedbackCategory}
+              message={feedbackMessage}
+              status={feedbackStatus}
+              loading={feedbackLoading}
+              onRatingChange={setFeedbackRating}
+              onCategoryChange={setFeedbackCategory}
+              onMessageChange={setFeedbackMessage}
+              onSubmit={handleFeedbackSubmit}
+            />
 
             <div className="elect-mic-row">
               <Button
@@ -336,7 +584,16 @@ export function ElectionAssistant() {
             </p>
 
             {error && <Alert className="elect-error">{error}</Alert>}
-            {authNotice && <Alert className="elect-error">{authNotice}</Alert>}
+            {authNotice && (
+              <Alert className="elect-error">
+                <div className="elect-notice-row">
+                  <span>{authNotice}</span>
+                  <button type="button" onClick={clearNotice}>
+                    Dismiss
+                  </button>
+                </div>
+              </Alert>
+            )}
 
             {session && (
               <div className="elect-session">
@@ -363,7 +620,7 @@ export function ElectionAssistant() {
             <Card className="elect-transparency">
               <p className="elect-panel-title">Transparency</p>
               <p>
-                Election facts come from Google Civic fields. Address text is used for Google address and voter-data services, not placed in the Gemini prompt.
+                Election facts come from the configured provider. Address text is used for Google address and voter-data services, not placed in the Gemini prompt.
               </p>
             </Card>
           </aside>
@@ -371,6 +628,36 @@ export function ElectionAssistant() {
       </div>
     </main>
   );
+}
+
+function getCurrentHost() {
+  return typeof window !== 'undefined' ? window.location.hostname : '';
+}
+
+function getAuthLabel(
+  profile: { displayName: string; email: string; uid: string; isAnonymous: boolean } | null,
+  status: string,
+) {
+  if (profile) {
+    const name = profile.displayName || profile.email || profile.uid.slice(0, 8);
+    if (status === 'restoring') return `Restoring ${name}`;
+    return profile.isAnonymous ? `${name} ready` : name;
+  }
+  if (status === 'loading') return 'Checking session';
+  return 'Guest optional';
+}
+
+function isPendingValue(value?: string | null) {
+  return !value || value === MISSING;
+}
+
+function formatLocationMeta(suggestion: LocationSuggestion) {
+  return [suggestion.locality, suggestion.state, suggestion.postalCode].filter(Boolean).join(', ') || 'Google verified address';
+}
+
+function formatLocationStatus(suggestion: LocationSuggestion) {
+  const meta = formatLocationMeta(suggestion);
+  return meta === 'Google verified address' ? 'Selected a Google verified address.' : `Selected: ${meta}.`;
 }
 
 function StepRail({ activeStep }: { activeStep: number }) {
@@ -395,6 +682,10 @@ function StepRail({ activeStep }: { activeStep: number }) {
 }
 
 function StepContent({ session }: { session: UserSession }) {
+  if (session.country === 'IN') {
+    return <IndiaStepContent session={session} />;
+  }
+
   const { election, pollingLocations, contests } = session.electionData;
   const firstLocation = pollingLocations[0];
 
@@ -418,6 +709,84 @@ function StepContent({ session }: { session: UserSession }) {
   );
 }
 
+function IndiaStepContent({ session }: { session: UserSession }) {
+  const { electionData } = session;
+  const resources = electionData.officialResources;
+  const address = formatCivicAddress(electionData.normalizedInput) || session.sanitizedAddress;
+
+  if (session.currentStep === 1) {
+    return (
+      <Step
+        title="Understand The India Workflow"
+        icon={<Info />}
+        rows={[
+          ['Provider', electionData.dataProvider],
+          ['Official source', resources.electionAuthorityName],
+          ['Address checked', address],
+          ['Status', electionData.providerStatus],
+        ]}
+      />
+    );
+  }
+
+  if (session.currentStep === 2) {
+    return (
+      <Step
+        title="Know When To Vote"
+        icon={<Clock />}
+        rows={[
+          ['Election schedule', 'Check the current ECI election schedule for your state or constituency.'],
+          ['Where to check', resources.electionInfoUrl],
+          ['Why not automatic', 'A typed address alone does not return a verified India election date from your current APIs.'],
+        ]}
+      />
+    );
+  }
+
+  if (session.currentStep === 3) {
+    return (
+      <Step
+        title="Know Where To Vote"
+        icon={<MapPin />}
+        rows={[
+          ['Polling booth lookup', 'Use ECI voter search with EPIC number, registered mobile, or voter details.'],
+          ['Official portal', resources.votingLocationFinderUrl],
+          ['Helpline', 'Call 1950 with your STD code if online lookup does not work.'],
+        ]}
+      />
+    );
+  }
+
+  if (session.currentStep === 4) {
+    return (
+      <Step
+        title="Understand The Candidates"
+        icon={<Users />}
+        rows={[
+          ['Candidate affidavits', 'Available on the ECI Candidate Affidavit portal after nominations are filed.'],
+          ['Official portal', resources.ballotInfoUrl],
+          ['What to choose', 'Select the election and constituency on the official portal.'],
+        ]}
+      />
+    );
+  }
+
+  return (
+    <div>
+      <Step
+        title="Take The Next Action"
+        icon={<CheckCircle2 />}
+        rows={[
+          ['First action', 'Verify your voter record on the official ECI voter search portal.'],
+          ['Then', 'Use the returned voter details to confirm polling booth and constituency.'],
+          ['Candidate check', 'Open Candidate Affidavit portal for the selected election and constituency.'],
+        ]}
+      />
+      <IndiaActionLinks resources={resources} />
+    </div>
+  );
+}
+
 function Step({ title, icon, rows }: { title: string; icon: React.ReactNode; rows: [string, string][] }) {
   return (
     <div>
@@ -429,10 +798,216 @@ function Step({ title, icon, rows }: { title: string; icon: React.ReactNode; row
         {rows.map(([label, value]) => (
           <div key={label} className="elect-data-card">
             <dt>{label}</dt>
-            <dd>{value || MISSING}</dd>
+            <dd className={isPendingValue(value) ? 'elect-pending-value' : undefined}>
+              {isPendingValue(value) ? 'Check the official source for this field.' : value}
+            </dd>
           </div>
         ))}
       </dl>
+    </div>
+  );
+}
+
+function CivicQuestionPanel({
+  country,
+  question,
+  answer,
+  loading,
+  onQuestionChange,
+  onAsk,
+}: {
+  country: SupportedCountry;
+  question: string;
+  answer: CivicQuestionResponse | null;
+  loading: boolean;
+  onQuestionChange: (value: string) => void;
+  onAsk: (question?: string) => void;
+}) {
+  const suggestions = answer?.suggestedQuestions?.length ? answer.suggestedQuestions : INDIA_HELP_QUESTIONS;
+
+  return (
+    <Card className="elect-question-card">
+      <div className="elect-question-topline">
+        <div className="elect-section-heading elect-question-heading">
+          <MessageCircle />
+          <div>
+            <p className="elect-card-kicker">Official-first answers</p>
+            <h3>Voter Help Desk</h3>
+          </div>
+        </div>
+        <Badge>
+          <ShieldCheck /> {country === 'IN' ? 'ECI aware' : 'Official aware'}
+        </Badge>
+      </div>
+      <form
+        className="elect-question-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onAsk();
+        }}
+      >
+        <Input
+          value={question}
+          onChange={(event) => onQuestionChange(event.target.value)}
+          placeholder={country === 'IN' ? 'Ask about voter list, CM election, laws, polling booth...' : 'Ask a voter question...'}
+          aria-label="Ask a voter question"
+          className="elect-question-input"
+        />
+        <Button type="submit" disabled={loading || !question.trim()}>
+          {loading ? 'Answering...' : <><Send /> Ask</>}
+        </Button>
+      </form>
+      <div className="elect-question-chips" aria-label="Suggested voter questions">
+        {suggestions.map((item, index) => (
+          <Button
+            key={`suggestion-${index}-${item}`}
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => onAsk(item)}
+            disabled={loading}
+          >
+            {item}
+          </Button>
+        ))}
+      </div>
+      {answer && (
+        <div className="elect-answer" aria-live="polite">
+          <div className="elect-answer-header">
+            <CheckCircle2 />
+            <p>Answer</p>
+          </div>
+          <p>{answer.answer}</p>
+          {answer.sourceLinks.length > 0 && (
+            <ul>
+              {answer.sourceLinks.map((link) => (
+                <li key={`${link.label}-${link.href}`}>
+                  <a href={link.href} target="_blank" rel="noreferrer">
+                    {link.label}
+                    <ExternalLink aria-hidden="true" />
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+          <span>{answer.transparencyNote}</span>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function FeedbackPanel({
+  rating,
+  category,
+  message,
+  status,
+  loading,
+  onRatingChange,
+  onCategoryChange,
+  onMessageChange,
+  onSubmit,
+}: {
+  rating: number;
+  category: FeedbackCategory;
+  message: string;
+  status: string;
+  loading: boolean;
+  onRatingChange: (value: number) => void;
+  onCategoryChange: (value: FeedbackCategory) => void;
+  onMessageChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <Card className="elect-feedback-card">
+      <div className="elect-feedback-head">
+        <div className="elect-section-heading">
+          <Info />
+          <div>
+            <p className="elect-card-kicker">Improve the assistant</p>
+            <h3>Send Feedback</h3>
+          </div>
+        </div>
+        <span>Saved to Firebase</span>
+      </div>
+      <form className="elect-feedback-form" onSubmit={onSubmit}>
+        <div className="elect-rating-row" aria-label="Rate this experience from 1 to 5">
+          {[1, 2, 3, 4, 5].map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={value <= rating ? 'elect-rating-button elect-rating-button-active' : 'elect-rating-button'}
+              onClick={() => onRatingChange(value)}
+              aria-label={`${value} out of 5`}
+              aria-pressed={rating === value}
+            >
+              {value}
+            </button>
+          ))}
+        </div>
+        <div className="elect-feedback-grid">
+          <label>
+            Category
+            <select className="elect-feedback-select" value={category} onChange={(event) => onCategoryChange(event.target.value as FeedbackCategory)}>
+              {FEEDBACK_CATEGORIES.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <label>
+          What should be better?
+          <textarea
+            className="elect-feedback-textarea"
+            value={message}
+            onChange={(event) => onMessageChange(event.target.value)}
+            placeholder="Tell us what was unclear, incomplete, confusing, or useful."
+            maxLength={1200}
+          />
+        </label>
+        <div className="elect-feedback-actions">
+          <Button type="submit" disabled={loading || message.trim().length < 5}>
+            {loading ? 'Saving...' : 'Send feedback'}
+          </Button>
+          <p className="elect-feedback-status" aria-live="polite">
+            {status}
+          </p>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+function IndiaActionLinks({ resources }: { resources: OfficialElectionResources }) {
+  const voterSearch = safeExternalUrl(resources.electionRegistrationConfirmationUrl);
+  const voterPortal = safeExternalUrl(resources.votingLocationFinderUrl);
+  const candidatePortal = safeExternalUrl(resources.ballotInfoUrl);
+
+  return (
+    <div className="elect-action-links" aria-label="India election action links">
+      {voterSearch && (
+        <Button asChild variant="secondary">
+          <a href={voterSearch} target="_blank" rel="noreferrer">
+            <Search /> Check Voter Record
+          </a>
+        </Button>
+      )}
+      {voterPortal && (
+        <Button asChild variant="secondary">
+          <a href={voterPortal} target="_blank" rel="noreferrer">
+            <MapPin /> Find Booth
+          </a>
+        </Button>
+      )}
+      {candidatePortal && (
+        <Button asChild variant="secondary">
+          <a href={candidatePortal} target="_blank" rel="noreferrer">
+            <Users /> Candidates
+          </a>
+        </Button>
+      )}
     </div>
   );
 }
@@ -465,16 +1040,26 @@ function CandidateList({ contests }: { contests: UserSession['electionData']['co
                     )}
                   </div>
                 );
-              }) : <p className="elect-muted">{MISSING}</p>}
+              }) : <p className="elect-muted">Candidate details will appear after the official provider returns contests.</p>}
             </div>
           </div>
-        )) : <div className="elect-data-card elect-muted">{MISSING}</div>}
+        )) : <div className="elect-data-card elect-muted">Candidate details will appear after the official provider returns contests.</div>}
       </div>
     </div>
   );
 }
 
 function GuidancePanel({ guidance, loading }: { guidance: GuidanceResponse | null; loading: boolean }) {
+  const instructions = (guidance?.stepInstructions || []).filter((item) => !isPendingValue(item));
+  const panelLines = guidance
+    ? [
+        { label: 'Timeline', value: guidance.timelineSummary },
+        { label: 'Polling', value: guidance.pollingLocationDetails },
+        { label: 'Candidates', value: guidance.candidateOverview },
+        { label: 'Next action', value: guidance.nextConcreteAction, highlight: true },
+      ].filter((item) => !isPendingValue(item.value))
+    : [];
+
   return (
     <Card>
       <CardHeader>
@@ -490,13 +1075,32 @@ function GuidancePanel({ guidance, loading }: { guidance: GuidanceResponse | nul
           </div>
         ) : (
           <div className="elect-guide-body">
-            <ul>
-              {(guidance?.stepInstructions || ['Enter an address to begin.']).map((item) => <li key={item}>{item}</li>)}
-            </ul>
-            <PanelLine label="Timeline" value={guidance?.timelineSummary} />
-            <PanelLine label="Polling" value={guidance?.pollingLocationDetails} />
-            <PanelLine label="Candidates" value={guidance?.candidateOverview} />
-            <PanelLine label="Next action" value={guidance?.nextConcreteAction} highlight />
+            {!guidance ? (
+              <div className="elect-guide-empty">
+                <strong>Start with an address</strong>
+                <span>Verified guidance, official links, and next actions will load here.</span>
+              </div>
+            ) : (
+              <>
+                {instructions.length > 0 && (
+                  <ul>
+                    {instructions.map((item, index) => (
+                      <li key={`instruction-${index}-${item}`}>{item}</li>
+                    ))}
+                  </ul>
+                )}
+                {panelLines.length > 0 ? (
+                  panelLines.map((item) => (
+                    <PanelLine key={item.label} label={item.label} value={item.value} highlight={item.highlight} />
+                  ))
+                ) : (
+                  <div className="elect-guide-empty">
+                    <strong>Use official links</strong>
+                    <span>The assistant found your workflow, but detailed fields should be confirmed on the official portal.</span>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </CardContent>
@@ -504,11 +1108,11 @@ function GuidancePanel({ guidance, loading }: { guidance: GuidanceResponse | nul
   );
 }
 
-function PanelLine({ label, value, highlight = false }: { label: string; value?: string; highlight?: boolean }) {
+function PanelLine({ label, value, highlight = false }: { label: string; value: string; highlight?: boolean }) {
   return (
     <section className="elect-panel-line">
       <p>{label}</p>
-      <strong className={highlight ? 'elect-highlight' : undefined}>{value || MISSING}</strong>
+      <strong className={highlight ? 'elect-highlight' : undefined}>{value}</strong>
     </section>
   );
 }
@@ -524,7 +1128,7 @@ function OfficialResourcesPanel({ resources }: { resources?: OfficialElectionRes
       {links.length ? (
         <ul className="elect-resource-list">
           {links.map((link) => (
-            <li key={link.href}>
+            <li key={`${link.label}-${link.href}`}>
               <a href={link.href} target="_blank" rel="noreferrer">
                 {link.label}
                 <ExternalLink aria-hidden="true" />
@@ -570,10 +1174,10 @@ function getOfficialLinks(resources: OfficialElectionResources) {
   return [
     { label: 'Election office', href: safeExternalUrl(resources.electionInfoUrl) },
     { label: 'Find voting location', href: safeExternalUrl(resources.votingLocationFinderUrl) },
-    { label: 'Registration', href: safeExternalUrl(resources.electionRegistrationUrl) },
-    { label: 'Check registration', href: safeExternalUrl(resources.electionRegistrationConfirmationUrl) },
-    { label: 'Ballot information', href: safeExternalUrl(resources.ballotInfoUrl) },
-    { label: 'Absentee voting', href: safeExternalUrl(resources.absenteeVotingInfoUrl) },
+    { label: 'Voter services', href: safeExternalUrl(resources.electionRegistrationUrl) },
+    { label: 'Check voter status', href: safeExternalUrl(resources.electionRegistrationConfirmationUrl) },
+    { label: 'Candidate information', href: safeExternalUrl(resources.ballotInfoUrl) },
+    { label: 'Remote voting information', href: safeExternalUrl(resources.absenteeVotingInfoUrl) },
   ].filter((link): link is { label: string; href: string } => Boolean(link.href));
 }
 

@@ -1,5 +1,5 @@
 import 'server-only';
-import { ExtractedElectionData, MISSING } from '@/types';
+import { ExtractedElectionData, MISSING, SupportedCountry } from '@/types';
 
 function text(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : MISSING;
@@ -19,7 +19,55 @@ function civicAddress(value: any) {
   };
 }
 
-export function extractElectionData(payload: any): ExtractedElectionData {
+const INDIA_OFFICIAL_RESOURCES = {
+  stateName: MISSING,
+  electionAuthorityName: 'Election Commission of India',
+  electionAuthorityPhone: MISSING,
+  electionAuthorityEmail: MISSING,
+  electionInfoUrl: 'https://www.eci.gov.in/',
+  votingLocationFinderUrl: 'https://voters.eci.gov.in/',
+  ballotInfoUrl: 'https://affidavit.eci.gov.in/',
+  electionRegistrationUrl: 'https://voters.eci.gov.in/',
+  electionRegistrationConfirmationUrl: 'https://electoralsearch.eci.gov.in/',
+  absenteeVotingInfoUrl: 'https://ecisveep.nic.in/voters/how-to-vote/',
+};
+
+function postalCodeFromAddress(address: string, country: SupportedCountry) {
+  const pattern = country === 'IN' ? /\b\d{6}\b/ : /\b\d{5}(?:-\d{4})?\b/;
+  return address.match(pattern)?.[0] || MISSING;
+}
+
+export function buildIndiaElectionData(displayAddress: string): ExtractedElectionData {
+  return {
+    country: 'IN',
+    dataProvider: 'Google Geocoding + official Election Commission of India resources',
+    providerStatus: 'India official-link workflow. Google can normalize the address, while polling booth, voter record, schedule, and candidate details must be checked on official ECI services.',
+    providerNotes: [
+      'Google Civic voterInfo is U.S.-focused, so India mode does not call Civic for polling booth or candidate data.',
+      'India polling station lookup requires an official ECI voter search using EPIC, mobile, or voter details.',
+      'Candidate data is published on the ECI Candidate Affidavit portal after nominations are filed.',
+    ],
+    election: {
+      id: 'india-election-services',
+      name: 'India voter record and polling-booth lookup',
+      electionDay: MISSING,
+      ocdDivisionId: 'country:in',
+    },
+    normalizedInput: {
+      locationName: MISSING,
+      line1: displayAddress,
+      city: MISSING,
+      state: MISSING,
+      zip: postalCodeFromAddress(displayAddress, 'IN'),
+    },
+    officialResources: INDIA_OFFICIAL_RESOURCES,
+    pollingLocations: [],
+    contests: [],
+    rawPayload: { provider: 'india-scaffold' },
+  };
+}
+
+export function extractElectionData(payload: any, country: SupportedCountry = 'US'): ExtractedElectionData {
   const election = payload?.election || {};
   const state = list(payload?.state)[0] || {};
   const electionAdministrationBody = state?.electionAdministrationBody || {};
@@ -50,6 +98,10 @@ export function extractElectionData(payload: any): ExtractedElectionData {
   }));
 
   return {
+    country,
+    dataProvider: 'Google Civic Information API',
+    providerStatus: 'Live Google Civic voterInfo lookup',
+    providerNotes: ['Google Civic voterInfo currently powers the U.S. provider in this app.'],
     election: {
       id: text(election?.id),
       name: text(election?.name),

@@ -1,30 +1,8 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default deny
     match /{document=**} {
       allow read, write: if false;
-    }
-
-    // Helper functions
-    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
-    function isSignedIn() { return request.auth != null; }
-    function isOwner(userId) { return request.auth.uid == userId; }
-
-    function isValidSession(data) {
-      return data.keys().hasAll(['id', 'address', 'electionData', 'currentStep', 'updatedAt']) &&
-             data.keys().size() <= 7 &&
-             data.id is string &&
-             data.address is string && data.address.size() <= 200 &&
-             data.currentStep is int && data.currentStep >= 1 && data.currentStep <= 5 &&
-             data.updatedAt is int;
-    }
-
-    match /sessions/{sessionId} {
-      allow get: if true; // Public sessions if shared, or restrict to owner if needed
-      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
-      allow create: if isSignedIn() && isValidSession(request.resource.data) && (request.resource.data.userId == request.auth.uid || request.resource.data.userId == null);
-      allow update: if isSignedIn() && isValidSession(request.resource.data) && (resource.data.userId == request.auth.uid || resource.data.userId == null);
     }
   }
 }

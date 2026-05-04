@@ -39,6 +39,18 @@ function Read-DotEnv($Path) {
   return $values
 }
 
+function Merge-DotEnv($Paths) {
+  $values = @{}
+  foreach ($path in $Paths) {
+    $fileValues = Read-DotEnv $path
+    foreach ($key in $fileValues.Keys) {
+      $values[$key] = $fileValues[$key]
+    }
+  }
+
+  return $values
+}
+
 function Get-DeployValue($Name, $DotEnvValues, [switch]$Required) {
   $value = [Environment]::GetEnvironmentVariable($Name)
   if (-not $value -and $DotEnvValues.ContainsKey($Name)) {
@@ -50,6 +62,24 @@ function Get-DeployValue($Name, $DotEnvValues, [switch]$Required) {
   }
 
   return $value
+}
+
+function Get-DeployValueFromAliases($Names, $DotEnvValues, [switch]$Required) {
+  foreach ($name in $Names) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if (-not $value -and $DotEnvValues.ContainsKey($name)) {
+      $value = $DotEnvValues[$name]
+    }
+    if ($value) {
+      return $value
+    }
+  }
+
+  if ($Required) {
+    throw "Missing required value: $($Names -join ' or '). Add it to .env.local, .env, or set it in this shell before deploying."
+  }
+
+  return ""
 }
 
 function Ensure-Secret($ProjectId, $SecretName, $Value) {
@@ -76,23 +106,32 @@ function Ensure-Secret($ProjectId, $SecretName, $Value) {
 
 Require-Command "gcloud"
 
-$dotEnv = Read-DotEnv ".env"
+$dotEnv = Merge-DotEnv @(".env", ".env.local")
 $geminiApiKey = Get-DeployValue "GEMINI_API_KEY" $dotEnv -Required
-$civicApiKey = Get-DeployValue "GOOGLE_CIVIC_API_KEY" $dotEnv
-if (-not $civicApiKey) {
-  $civicApiKey = Get-DeployValue "VITE_GOOGLE_CIVIC_API_KEY" $dotEnv
-}
-if (-not $civicApiKey) {
-  throw "Missing required value: GOOGLE_CIVIC_API_KEY. Add it to .env or set it in this shell before deploying."
-}
+$civicApiKey = Get-DeployValueFromAliases @("GOOGLE_CIVIC_API_KEY", "VITE_GOOGLE_CIVIC_API_KEY") $dotEnv
 $speechApiKey = Get-DeployValue "SPEECH_TO_TEXT_API" $dotEnv
 $googleCredentialsJson = Get-DeployValue "GOOGLE_APPLICATION_CREDENTIALS_JSON" $dotEnv
 $firebaseServiceAccountJson = Get-DeployValue "FIREBASE_SERVICE_ACCOUNT_JSON" $dotEnv
 $geocodingApiKey = Get-DeployValue "GOOGLE_GEOCODING_API_KEY" $dotEnv
 $mapsApiKey = Get-DeployValue "GOOGLE_MAPS_API_KEY" $dotEnv
+$firebaseWebApiKey = Get-DeployValueFromAliases @("FIREBASE_WEB_API_KEY", "NEXT_PUBLIC_FIREBASE_API_KEY") $dotEnv -Required
+$firebaseAuthDomain = Get-DeployValueFromAliases @("FIREBASE_AUTH_DOMAIN", "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN") $dotEnv -Required
+$firebaseProjectId = Get-DeployValueFromAliases @("FIREBASE_PROJECT_ID", "NEXT_PUBLIC_FIREBASE_PROJECT_ID") $dotEnv -Required
+$firebaseAppId = Get-DeployValueFromAliases @("FIREBASE_APP_ID", "NEXT_PUBLIC_FIREBASE_APP_ID") $dotEnv -Required
+$firebaseMessagingSenderId = Get-DeployValueFromAliases @("FIREBASE_MESSAGING_SENDER_ID", "NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID") $dotEnv
+$firebaseStorageBucket = Get-DeployValueFromAliases @("FIREBASE_STORAGE_BUCKET", "NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET") $dotEnv
+$firebaseMeasurementId = Get-DeployValueFromAliases @("FIREBASE_MEASUREMENT_ID", "NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID") $dotEnv
 $geminiModel = Get-DeployValue "GEMINI_MODEL" $dotEnv
 if (-not $geminiModel) {
   $geminiModel = "gemini-2.5-flash"
+}
+
+if (-not $civicApiKey) {
+  Write-Warning "No GOOGLE_CIVIC_API_KEY was found. India mode can deploy, but the U.S. Google Civic provider will be unavailable."
+}
+
+if (-not $geocodingApiKey -and -not $mapsApiKey) {
+  Write-Warning "No GOOGLE_GEOCODING_API_KEY or GOOGLE_MAPS_API_KEY was found. India mode will accept complete PIN-code addresses, but Google address normalization will be unavailable."
 }
 
 if (-not $speechApiKey -and -not $googleCredentialsJson) {
@@ -108,9 +147,13 @@ if (-not $SkipApiEnable) {
     artifactregistry.googleapis.com `
     secretmanager.googleapis.com `
     firestore.googleapis.com `
-    civicinfo.googleapis.com `
+    identitytoolkit.googleapis.com `
     speech.googleapis.com `
     --project $ProjectId | Out-Null
+
+  if ($civicApiKey) {
+    & gcloud services enable civicinfo.googleapis.com --project $ProjectId | Out-Null
+  }
 
   if ($geocodingApiKey -or $mapsApiKey) {
     & gcloud services enable geocoding-backend.googleapis.com --project $ProjectId | Out-Null
@@ -154,7 +197,27 @@ if ($googleCredentialsJson -or (-not $speechApiKey)) {
     --quiet | Out-Null
 }
 
-$envVars = "FIRESTORE_DATABASE_ID=$FirestoreDatabaseId,GEMINI_MODEL=$geminiModel,NEXT_TELEMETRY_DISABLED=1"
+$runtimeEnvVars = [ordered]@{
+  FIRESTORE_DATABASE_ID = $FirestoreDatabaseId
+  GEMINI_MODEL = $geminiModel
+  NEXT_TELEMETRY_DISABLED = "1"
+  FIREBASE_WEB_API_KEY = $firebaseWebApiKey
+  FIREBASE_AUTH_DOMAIN = $firebaseAuthDomain
+  FIREBASE_PROJECT_ID = $firebaseProjectId
+  FIREBASE_APP_ID = $firebaseAppId
+}
+
+if ($firebaseMessagingSenderId) {
+  $runtimeEnvVars["FIREBASE_MESSAGING_SENDER_ID"] = $firebaseMessagingSenderId
+}
+if ($firebaseStorageBucket) {
+  $runtimeEnvVars["FIREBASE_STORAGE_BUCKET"] = $firebaseStorageBucket
+}
+if ($firebaseMeasurementId) {
+  $runtimeEnvVars["FIREBASE_MEASUREMENT_ID"] = $firebaseMeasurementId
+}
+
+$envVars = ($runtimeEnvVars.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ","
 $deployArgs = @(
   "run", "deploy", $ServiceName,
   "--project", $ProjectId,
@@ -180,4 +243,6 @@ Write-Host ""
 Write-Host "Deployed ELECTAI to Cloud Run:" -ForegroundColor Green
 Write-Host $serviceUrl
 Write-Host ""
-Write-Host "Next step: add this domain to Firebase Authentication authorized domains if Google or Guest sign-in is blocked."
+$serviceDomain = ([Uri]$serviceUrl).Host
+Write-Host "Next step: add this domain to Firebase Authentication authorized domains if Google or Guest sign-in is blocked:" -ForegroundColor Yellow
+Write-Host $serviceDomain

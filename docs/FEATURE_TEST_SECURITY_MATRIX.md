@@ -45,8 +45,8 @@ Product intent: never hallucinate election facts.
 
 Test cases:
 - Valid Civic response extracts election name and date.
-- Missing polling location renders `This information is not available.`
-- Missing candidates renders `This information is not available.`
+- Pending polling location renders `Official data pending.`
+- Pending candidate data renders `Official data pending.`
 - Official election office links are extracted from Civic administration fields.
 - Civic API failure returns a user-safe error.
 

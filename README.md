@@ -4,7 +4,7 @@ ELECTAI is an MVP civic-tech assistant for the prompt: **help users understand t
 
 ## Chosen Vertical
 
-Voter readiness for first-time, busy, or low-literacy voters. The assistant accepts an address, retrieves verified election data from Google Civic Information API, and turns that data into five simple steps:
+India-first voter readiness for first-time, busy, or low-literacy voters, with a provider model that can expand globally. The assistant accepts an address, uses Google address services where configured, retrieves country-specific official election data or official resources, and turns that data into five simple steps:
 
 1. Understand the election
 2. Know when to vote
@@ -18,9 +18,11 @@ The product is intentionally not a general chatbot. It is a structured assistant
 
 - User input is validated and sanitized on the backend.
 - Spoken addresses are cleaned up before lookup, and incomplete transcripts are stopped with a clear city/state/ZIP prompt.
-- Election facts come only from Google Civic Information API.
+- Election facts come only from the configured country provider.
+- India mode uses Google address normalization and official Election Commission of India resources until an approved India election-data API is configured.
+- U.S. mode uses Google Civic Information API.
 - Official election office links are extracted from Civic `state.electionAdministrationBody`.
-- Missing fields are displayed as: `This information is not available.`
+- Pending official fields are displayed as: `Official data pending.`
 - Gemini receives a structured session object, not raw user input.
 - Gemini does not receive the user's address or the raw Civic payload.
 - Firestore stores the session for continuity.
@@ -101,7 +103,8 @@ Collection: `sessions`
 
 ## Google Services Used
 
-- Google Civic Information API: verified voter and contest data.
+- Google Geocoding or Maps API: address cleanup and India address normalization.
+- Google Civic Information API: verified U.S. voter and contest data.
 - Google Geocoding API, optional: server-side address cleanup for spoken or partial addresses before Civic lookup.
 - Google Maps and Google Calendar links: voter action shortcuts for polling locations and election dates.
 - Gemini API: plain-language guidance from verified structured data only.
@@ -113,9 +116,16 @@ Collection: `sessions`
 
 ## Environment Variables
 
-Use `.env.local` for local secrets. Do not expose keys with `NEXT_PUBLIC_`.
+Use `.env.local` for local secrets. Firebase web-app identifiers are loaded at runtime for Cloud Run through `/api/firebase-config`; keep Civic, Gemini, Speech, and service-account values server-side.
 
 ```bash
+FIREBASE_WEB_API_KEY=
+FIREBASE_AUTH_DOMAIN=
+FIREBASE_PROJECT_ID=
+FIREBASE_APP_ID=
+FIREBASE_MESSAGING_SENDER_ID=
+FIREBASE_STORAGE_BUCKET=
+FIREBASE_MEASUREMENT_ID=
 GEMINI_API_KEY=
 GOOGLE_CIVIC_API_KEY=
 GEMINI_MODEL=gemini-2.5-flash
@@ -139,6 +149,9 @@ Firebase Auth setup:
 
 - Add `localhost`, `127.0.0.1`, and your deployed domain in Firebase Console > Authentication > Settings > Authorized domains.
 - Enable Google and Anonymous providers in Firebase Console > Authentication > Sign-in method.
+- Configure Firebase Auth with `FIREBASE_*` Cloud Run runtime environment variables instead of `firebase-applet-config.json`.
+
+See [docs/FIREBASE_AUTH_SETUP.md](docs/FIREBASE_AUTH_SETUP.md) for Cloud Run and Firebase setup.
 
 ## Local Setup
 
@@ -148,6 +161,12 @@ npm run dev
 ```
 
 Open `http://localhost:3000`.
+
+India is the default provider. Use the country selector to switch to the U.S. Google Civic provider for U.S. addresses.
+
+If Google or Guest sign-in shows `auth/unauthorized-domain`, add the current browser host in Firebase Console > Authentication > Settings > Authorized domains. See [docs/LOCAL_TROUBLESHOOTING.md](docs/LOCAL_TROUBLESHOOTING.md).
+
+For the global data-provider plan and the India API questions to settle before production, see [docs/GLOBAL_PROVIDER_STRATEGY.md](docs/GLOBAL_PROVIDER_STRATEGY.md).
 
 ## Cloud Run Deployment
 

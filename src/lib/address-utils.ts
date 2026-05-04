@@ -1,7 +1,8 @@
-import { MISSING } from '@/types';
+import { MISSING, SupportedCountry } from '@/types';
 
 const STREET_WORDS = /\b(allee|aly|avenue|ave|boulevard|blvd|circle|cir|court|ct|drive|dr|highway|hwy|lane|ln|parkway|pkwy|place|pl|road|rd|route|rte|square|sq|street|st|terrace|ter|trail|trl|way)\b/i;
 const US_ZIP_CODE = /\b\d{5}(?:-\d{4})?\b/;
+const INDIA_PIN_CODE = /\b\d{6}\b/;
 
 const STATE_NAMES = [
   'alabama',
@@ -248,6 +249,7 @@ export function normalizeSpokenAddress(input: string) {
     .replace(/^\s*(number|no\.?)\s+(?=[a-z0-9])/i, '')
     .replace(/\b(apartment|apt)\s+number\s+/gi, 'Apt ')
     .replace(/\b(zip|zipcode|zip code)\s+(\d{5})\b/gi, '$2')
+    .replace(/\b(pin|pincode|pin code)\s+(\d{6})\b/gi, '$2')
     .replace(/\s+,/g, ',')
     .replace(/,\s*/g, ', ')
     .replace(/\s+/g, ' ')
@@ -256,8 +258,7 @@ export function normalizeSpokenAddress(input: string) {
   return replaceLeadingNumberWords(value);
 }
 
-export function hasCompleteAddressSignal(input: string) {
-  const value = normalizeSpokenAddress(input);
+function hasCompleteUsAddressSignal(value: string) {
   const hasStreetNumber = /\b\d+[a-z]?\b/i.test(value);
   const hasStreet = STREET_WORDS.test(value);
   const hasStateOrZip = US_ZIP_CODE.test(value) || hasStateAbbreviation(value) || hasStateName(value);
@@ -265,9 +266,29 @@ export function hasCompleteAddressSignal(input: string) {
   return hasStreetNumber && hasStreet && hasStateOrZip;
 }
 
-export function getAddressCompletionHint(input: string) {
-  if (!input.trim() || input === MISSING || hasCompleteAddressSignal(input)) return '';
-  return 'Add city, state, and ZIP so Google Civic can find the correct ballot and polling place.';
+function hasCompleteIndiaAddressSignal(value: string) {
+  const hasPinCode = INDIA_PIN_CODE.test(value);
+  const words = value
+    .replace(INDIA_PIN_CODE, '')
+    .split(/[\s,]+/)
+    .map((part) => part.replace(/[^a-z]/gi, ''))
+    .filter((part) => part.length >= 3);
+
+  return hasPinCode && words.length >= 3;
+}
+
+export function hasCompleteAddressSignal(input: string, country: SupportedCountry = 'IN') {
+  const value = normalizeSpokenAddress(input);
+
+  return country === 'US' ? hasCompleteUsAddressSignal(value) : hasCompleteIndiaAddressSignal(value);
+}
+
+export function getAddressCompletionHint(input: string, country: SupportedCountry = 'IN') {
+  if (!input.trim() || input === MISSING || hasCompleteAddressSignal(input, country)) return '';
+  if (country === 'US') {
+    return 'Add city, state, and ZIP so Google Civic can find the correct ballot and polling place.';
+  }
+  return 'Add locality, city, state, and 6-digit PIN code so Google can verify the India address.';
 }
 
 export function formatCivicAddress(parts: {

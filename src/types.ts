@@ -1,4 +1,6 @@
-export const MISSING = 'This information is not available.';
+export const MISSING = 'Official data pending.';
+
+export type SupportedCountry = 'IN' | 'US';
 
 export type CivicAddress = {
   locationName: string;
@@ -50,6 +52,10 @@ export type OfficialElectionResources = {
 };
 
 export type ExtractedElectionData = {
+  country: SupportedCountry;
+  dataProvider: string;
+  providerStatus: string;
+  providerNotes: string[];
   election: {
     id: string;
     name: string;
@@ -77,6 +83,7 @@ export type UserSession = {
   currentStep: number;
   createdAt: number;
   updatedAt: number;
+  country: SupportedCountry;
   addressSource?: 'input' | 'google-geocoding';
   userId?: string | null;
 };
@@ -88,6 +95,39 @@ export type GuidanceResponse = {
   candidateOverview: string;
   nextConcreteAction: string;
   transparencyNote: string;
+};
+
+export type SourceLink = {
+  label: string;
+  href: string;
+};
+
+export type CivicQuestionResponse = {
+  answer: string;
+  sourceLinks: SourceLink[];
+  suggestedQuestions: string[];
+  transparencyNote: string;
+};
+
+export type LocationSuggestion = {
+  id: string;
+  label: string;
+  locality: string;
+  state: string;
+  postalCode: string;
+  country: SupportedCountry;
+};
+
+export type LocationSuggestionResponse = {
+  configured: boolean;
+  suggestions: LocationSuggestion[];
+  message?: string;
+};
+
+export type FeedbackResponse = {
+  id: string;
+  saved: boolean;
+  message: string;
 };
 
 export type AssistantResponse = {

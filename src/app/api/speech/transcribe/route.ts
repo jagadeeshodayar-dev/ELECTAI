@@ -41,7 +41,7 @@ async function recognizeWithApiKey(audio: Buffer, contentType: string) {
 
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(payload?.error?.message || 'Speech transcription is not available.');
+    throw new Error(payload?.error?.message || 'Speech transcription is temporarily offline.');
   }
 
   return payload.results?.map((result: any) => result.alternatives?.[0]?.transcript).filter(Boolean).join(' ') || '';
@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
     const details = error instanceof Error ? error.message : '';
     const message = details.includes('Could not load the default credentials')
       ? 'Speech-to-Text needs GOOGLE_APPLICATION_CREDENTIALS_JSON, GOOGLE_APPLICATION_CREDENTIALS, or SPEECH_TO_TEXT_API on the server.'
-      : details || 'Speech transcription is not available.';
+      : details || 'Speech transcription is temporarily offline.';
     return NextResponse.json({ error: message }, { status: 503 });
   }
 }
